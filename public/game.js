@@ -193,20 +193,55 @@ class TwitchKeeper {
             const progress = Math.min(elapsed / ball.userData.duration, 1);
 
             if (progress >= 1) {
-                // Ball reached goalkeeper - check for save
+                // Ball reached goal line - check for save
                 const result = this.checkSave(ball);
 
-                // Handle result for both online and offline modes
-                if (this.socket && this.socket.connected) {
-                    this.socket.emit('ballResult', { ballId, result });
-                } else {
-                    // Offline mode - update score locally
-                    this.updateScoreLocally(result);
-                }
+                if (result === 'save') {
+                    // Ball was saved - start bounce back animation
+                    ball.userData.bouncing = true;
+                    ball.userData.bounceStartTime = Date.now();
+                    ball.userData.bounceDuration = 1500; // 1.5 seconds bounce back
 
-                // Remove ball
-                this.scene.remove(ball);
-                this.balls.delete(ballId);
+                    // Create explosion effect
+                    this.createSaveExplosion(ball.position);
+                } else {
+                    // Goal - handle result and remove ball
+                    if (this.socket && this.socket.connected) {
+                        this.socket.emit('ballResult', { ballId, result });
+                    } else {
+                        this.updateScoreLocally(result);
+                    }
+                    this.scene.remove(ball);
+                    this.balls.delete(ballId);
+                }
+            } else if (ball.userData.bouncing) {
+                // Handle bounce back animation for saved balls
+                const bounceElapsed = Date.now() - ball.userData.bounceStartTime;
+                const bounceProgress = Math.min(bounceElapsed / ball.userData.bounceDuration, 1);
+
+                if (bounceProgress >= 1) {
+                    // Bounce animation complete - handle result and remove
+                    if (this.socket && this.socket.connected) {
+                        this.socket.emit('ballResult', { ballId: ballId, result: 'save' });
+                    } else {
+                        this.updateScoreLocally('save');
+                    }
+                    this.scene.remove(ball);
+                    this.balls.delete(ballId);
+                } else {
+                    // Animate bounce back toward viewer
+                    const bounceEase = this.easeOutBounce(bounceProgress);
+                    ball.position.z = ball.userData.targetPosition.z + (30 * bounceEase);
+
+                    // Spin the ball dramatically during bounce
+                    ball.rotation.x += 0.3;
+                    ball.rotation.y += 0.2;
+                    ball.rotation.z += 0.1;
+
+                    // Scale up slightly during bounce for emphasis
+                    const bounceScale = 0.7 + (0.5 * Math.sin(bounceProgress * Math.PI));
+                    ball.scale.set(bounceScale, bounceScale, bounceScale);
+                }
             } else {
                 // Animate ball movement from viewer toward goal
                 const targetPos = ball.userData.targetPosition;
@@ -281,6 +316,83 @@ class TwitchKeeper {
         return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
     }
 
+    easeOutBounce(t) {
+        if (t < 1 / 2.75) {
+            return 7.5625 * t * t;
+        } else if (t < 2 / 2.75) {
+            return 7.5625 * (t -= 1.5 / 2.75) * t + 0.75;
+        } else if (t < 2.5 / 2.75) {
+            return 7.5625 * (t -= 2.25 / 2.75) * t + 0.9375;
+        } else {
+            return 7.5625 * (t -= 2.625 / 2.75) * t + 0.984375;
+        }
+    }
+
+    createSaveExplosion(position) {
+        // Create multiple particles for explosion effect
+        for (let i = 0; i < 12; i++) {
+            const particleGeometry = new THREE.SphereGeometry(0.1, 8, 8);
+            const particleMaterial = new THREE.MeshPhongMaterial({
+                color: new THREE.Color().setHSL(Math.random() * 0.1 + 0.05, 1, 0.7), // Orange/yellow colors
+                transparent: true,
+                opacity: 0.8
+            });
+            const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+
+            // Position at ball location
+            particle.position.copy(position);
+
+            // Random velocity for explosion effect
+            const velocity = new THREE.Vector3(
+                (Math.random() - 0.5) * 20,
+                (Math.random() - 0.5) * 20,
+                (Math.random() - 0.5) * 20
+            );
+
+            particle.userData = {
+                velocity: velocity,
+                startTime: Date.now(),
+                lifetime: 1000 // 1 second lifetime
+            };
+
+            this.scene.add(particle);
+
+            // Store particle for cleanup
+            if (!this.explosionParticles) {
+                this.explosionParticles = new Map();
+            }
+            this.explosionParticles.set(Date.now() + i, particle);
+        }
+    }
+
+    updateExplosionParticles() {
+        if (!this.explosionParticles) return;
+
+        const currentTime = Date.now();
+
+        this.explosionParticles.forEach((particle, particleId) => {
+            const elapsed = currentTime - particle.userData.startTime;
+            const progress = elapsed / particle.userData.lifetime;
+
+            if (progress >= 1) {
+                // Remove expired particle
+                this.scene.remove(particle);
+                this.explosionParticles.delete(particleId);
+            } else {
+                // Update particle position and appearance
+                particle.position.add(particle.userData.velocity.clone().multiplyScalar(0.016)); // ~60fps
+                particle.userData.velocity.multiplyScalar(0.95); // Slow down over time
+
+                // Fade out
+                particle.material.opacity = 0.8 * (1 - progress);
+
+                // Scale down
+                const scale = 1 - (progress * 0.5);
+                particle.scale.set(scale, scale, scale);
+            }
+        });
+    }
+
     updateUI(gameState) {
         document.getElementById('saves').textContent = gameState.score.saves;
         document.getElementById('goals').textContent = gameState.score.goals;
@@ -299,6 +411,7 @@ class TwitchKeeper {
         requestAnimationFrame(() => this.animate());
 
         this.updateBalls();
+        this.updateExplosionParticles();
         this.renderer.render(this.scene, this.camera);
     }
 
